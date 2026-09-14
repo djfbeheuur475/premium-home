@@ -31,6 +31,11 @@ import {
 const WHOLE_HOUSE = 'climate.house';
 const WEATHER_ENTITY = 'weather.forecast_home';
 const SPOTIFY_ENTITY = 'media_player.spotifyplus_aidan_harper';
+const CALENDAR_PERSONAL = 'calendar.aidanharper_gmail_com';
+// Work calendar is free/busy only — verified live, every event's
+// `summary` field comes back as an empty string. Rendered as "Busy"
+// with no title, never a fabricated one, and never silently dropped.
+const CALENDAR_WORK = 'calendar.aharper3_cartology_com_au';
 
 const ROOMS = [
   {
@@ -193,6 +198,11 @@ class PremiumHomeCard extends LitElement {
     _topTracks: { state: true },
     _recentTracks: { state: true },
     _suggestionsLoading: { state: true },
+    _musicTab: { state: true },
+    _showResults: { state: true },
+    _showFavorites: { state: true },
+    _calendarDays: { state: true },
+    _calendarLoading: { state: true },
   };
 
   constructor() {
@@ -218,6 +228,11 @@ class PremiumHomeCard extends LitElement {
     this._topTracks = null;
     this._recentTracks = null;
     this._suggestionsLoading = false;
+    this._musicTab = 'songs';
+    this._showResults = null;
+    this._showFavorites = null;
+    this._calendarDays = null;
+    this._calendarLoading = false;
   }
 
   // --- HA card contract -------------------------------------------------
@@ -383,6 +398,100 @@ class PremiumHomeCard extends LitElement {
     this._suggestionsLoading = false;
   }
 
+  async _searchShows() {
+    const query = this._searchQuery.trim();
+    if (!query || !this._hass) return;
+    this._searching = true;
+    this._showResults = null;
+    this._searchError = null;
+    try {
+      const resp = await this._hass.connection.sendMessagePromise({
+        type: 'call_service',
+        domain: 'spotifyplus',
+        service: 'search_shows',
+        service_data: { entity_id: SPOTIFY_ENTITY, criteria: query, limit: 12 },
+        return_response: true,
+      });
+      this._showResults = resp?.response?.result?.items ?? [];
+    } catch (err) {
+      console.warn('premium-home: show search failed', err);
+      this._searchError = err?.message ?? String(err);
+      this._showResults = [];
+    }
+    this._searching = false;
+  }
+
+  async _fetchShowFavorites() {
+    if (!this._hass) return;
+    try {
+      const resp = await this._hass.connection.sendMessagePromise({
+        type: 'call_service',
+        domain: 'spotifyplus',
+        service: 'get_show_favorites',
+        service_data: { entity_id: SPOTIFY_ENTITY, limit: 6 },
+        return_response: true,
+      });
+      // Wrapped under `.show`, same pattern as recently-played tracks.
+      const items = resp?.response?.result?.items ?? [];
+      this._showFavorites = items.map((i) => i.show).filter(Boolean);
+    } catch (err) {
+      console.warn('premium-home: show favorites fetch failed', err);
+      this._showFavorites = [];
+    }
+  }
+
+  async _fetchCalendar() {
+    if (!this._hass || this._calendarLoading) return;
+    this._calendarLoading = true;
+    try {
+      const now = new Date();
+      const end = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      const fetchOne = (entityId) =>
+        this._hass.connection
+          .sendMessagePromise({
+            type: 'call_service',
+            domain: 'calendar',
+            service: 'get_events',
+            service_data: { start_date_time: now.toISOString(), end_date_time: end.toISOString() },
+            target: { entity_id: entityId },
+            return_response: true,
+          })
+          .catch((err) => {
+            console.warn('premium-home: calendar fetch failed for', entityId, err);
+            return null;
+          });
+
+      const [personal, work] = await Promise.all([
+        fetchOne(CALENDAR_PERSONAL),
+        fetchOne(CALENDAR_WORK),
+      ]);
+      const personalEvents = (personal?.response?.[CALENDAR_PERSONAL]?.events ?? []).map((e) => ({
+        ...e,
+        source: 'personal',
+      }));
+      const workEvents = (work?.response?.[CALENDAR_WORK]?.events ?? []).map((e) => ({
+        ...e,
+        source: 'work',
+      }));
+      const all = [...personalEvents, ...workEvents].sort(
+        (a, b) => new Date(a.start) - new Date(b.start)
+      );
+
+      const byDay = {};
+      for (const ev of all) {
+        const dayKey = ev.start.slice(0, 10);
+        (byDay[dayKey] ??= []).push(ev);
+      }
+      this._calendarDays = Object.entries(byDay)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, events]) => ({ date, events }));
+    } catch (err) {
+      console.warn('premium-home: calendar fetch failed', err);
+      this._calendarDays = [];
+    }
+    this._calendarLoading = false;
+  }
+
   // --- Services -------------------------------------------------------
 
   _toggleLight(entityId) {
@@ -437,6 +546,32 @@ class PremiumHomeCard extends LitElement {
     });
   }
 
+  // Podcasts play as a context (the show) rather than a track list —
+  // `play_show_latest_episode` is SpotifyPlus's own flag for "just play
+  // the newest episode", which matches "simple, not the full Spotify app".
+  _playShow(uri) {
+    if (!this._selectedDeviceId) return;
+    this._hass.callService('spotifyplus', 'player_media_play_context', {
+      entity_id: SPOTIFY_ENTITY,
+      context_uri: uri,
+      play_show_latest_episode: true,
+      device_id: this._selectedDeviceId,
+    });
+  }
+
+  _setMusicTab(tab) {
+    this._musicTab = tab;
+    this._searchResults = null;
+    this._showResults = null;
+    this._searchError = null;
+    if (tab === 'podcasts' && this._showFavorites === null) this._fetchShowFavorites();
+  }
+
+  _searchCurrent() {
+    if (this._musicTab === 'podcasts') this._searchShows();
+    else this._searchTracks();
+  }
+
   // --- Scenes -----------------------------------------------------------
   // No HA scene/script entities exist on this instance (checked live) —
   // each button below is a plain, transparent set of real service calls
@@ -482,6 +617,9 @@ class PremiumHomeCard extends LitElement {
     if (page === 'music') {
       if (this._spotifyDevices === null) this._fetchSpotifyDevices();
       if (this._topTracks === null) this._fetchSuggestions();
+    }
+    if (page === 'calendar' && this._calendarDays === null) {
+      this._fetchCalendar();
     }
   }
 
@@ -546,6 +684,8 @@ class PremiumHomeCard extends LitElement {
         return this._renderHumidity();
       case 'music':
         return this._renderMusic();
+      case 'calendar':
+        return this._renderCalendar();
       case 'rooms':
         return this._renderRooms();
       case 'room':
@@ -562,6 +702,7 @@ class PremiumHomeCard extends LitElement {
       { id: 'lights', icon: 'mdi:lightbulb-group-outline', label: 'Lights' },
       { id: 'humidity', icon: 'mdi:water-percent', label: 'Humidity' },
       { id: 'music', icon: 'mdi:spotify', label: 'Music' },
+      { id: 'calendar', icon: 'mdi:calendar', label: 'Calendar' },
     ];
     return html`
       <nav class="bottom-nav">
@@ -1229,48 +1370,85 @@ class PremiumHomeCard extends LitElement {
             `
           : html``}
 
+        <div class="segment-row">
+          <button
+            class="segment-btn ${this._musicTab === 'songs' ? 'active' : ''}"
+            @click=${() => this._setMusicTab('songs')}
+          >
+            Songs
+          </button>
+          <button
+            class="segment-btn ${this._musicTab === 'podcasts' ? 'active' : ''}"
+            @click=${() => this._setMusicTab('podcasts')}
+          >
+            Podcasts
+          </button>
+        </div>
+
         <div class="search-bar">
-          <button class="search-icon-btn" @click=${() => this._searchTracks()}>
+          <button class="search-icon-btn" @click=${() => this._searchCurrent()}>
             <ha-icon icon="mdi:magnify"></ha-icon>
           </button>
           <input
             type="search"
             enterkeyhint="search"
-            placeholder="Search a song"
+            placeholder=${this._musicTab === 'podcasts' ? 'Search a podcast' : 'Search a song'}
             .value=${this._searchQuery}
             @input=${(e) => {
               this._searchQuery = e.target.value;
             }}
             @keydown=${(e) => {
-              if (e.key === 'Enter') this._searchTracks();
+              if (e.key === 'Enter') this._searchCurrent();
             }}
           />
         </div>
 
         ${this._searching ? html`<div class="search-status">Searching…</div>` : html``}
         ${this._searchError ? html`<div class="search-status error">Search failed: ${this._searchError}</div>` : html``}
-        ${this._searchResults && this._searchResults.length === 0 && !this._searching && !this._searchError
-          ? html`<div class="search-status">No results</div>`
-          : html``}
 
-        ${this._searchResults
-          ? html`<section class="track-list">${this._searchResults.map((t) => this._renderTrackRow(t))}</section>`
+        ${this._musicTab === 'podcasts'
+          ? html`
+              ${this._showResults && this._showResults.length === 0 && !this._searching && !this._searchError
+                ? html`<div class="search-status">No results</div>`
+                : html``}
+              ${this._showResults
+                ? html`<section class="track-list">${this._showResults.map((s) => this._renderShowRow(s))}</section>`
+                : html`
+                    ${this._showFavorites?.length
+                      ? html`
+                          <h2 class="section-title">Your podcasts</h2>
+                          <section class="track-list">${this._showFavorites.map((s) => this._renderShowRow(s))}</section>
+                        `
+                      : html``}
+                    ${this._showFavorites && this._showFavorites.length === 0
+                      ? html`<div class="search-status">No followed podcasts yet — search to find some</div>`
+                      : html``}
+                    ${!this._showFavorites ? html`<div class="search-status">Loading your podcasts…</div>` : html``}
+                  `}
+            `
           : html`
-              ${this._recentTracks?.length
-                ? html`
-                    <h2 class="section-title">Recently played</h2>
-                    <section class="track-list">${this._recentTracks.map((t) => this._renderTrackRow(t))}</section>
-                  `
+              ${this._searchResults && this._searchResults.length === 0 && !this._searching && !this._searchError
+                ? html`<div class="search-status">No results</div>`
                 : html``}
-              ${this._topTracks?.length
-                ? html`
-                    <h2 class="section-title">Your top tracks</h2>
-                    <section class="track-list">${this._topTracks.map((t) => this._renderTrackRow(t))}</section>
-                  `
-                : html``}
-              ${this._suggestionsLoading && !this._topTracks && !this._recentTracks
-                ? html`<div class="search-status">Loading suggestions…</div>`
-                : html``}
+              ${this._searchResults
+                ? html`<section class="track-list">${this._searchResults.map((t) => this._renderTrackRow(t))}</section>`
+                : html`
+                    ${this._recentTracks?.length
+                      ? html`
+                          <h2 class="section-title">Recently played</h2>
+                          <section class="track-list">${this._recentTracks.map((t) => this._renderTrackRow(t))}</section>
+                        `
+                      : html``}
+                    ${this._topTracks?.length
+                      ? html`
+                          <h2 class="section-title">Your top tracks</h2>
+                          <section class="track-list">${this._topTracks.map((t) => this._renderTrackRow(t))}</section>
+                        `
+                      : html``}
+                    ${this._suggestionsLoading && !this._topTracks && !this._recentTracks
+                      ? html`<div class="search-status">Loading suggestions…</div>`
+                      : html``}
+                  `}
             `}
         ${selectedDevice ? html`` : html``}
       </div>
@@ -1292,6 +1470,66 @@ class PremiumHomeCard extends LitElement {
         <ha-icon class="track-play" icon="mdi:play-circle"></ha-icon>
       </button>
     `;
+  }
+
+  _renderShowRow(show) {
+    return html`
+      <button class="track-row" @click=${() => this._playShow(show.uri)} ?disabled=${!this._selectedDeviceId}>
+        ${show.image_url
+          ? html`<img class="track-art" src=${show.image_url} alt="" />`
+          : html`<div class="track-art placeholder"><ha-icon icon="mdi:podcast"></ha-icon></div>`}
+        <div class="track-text">
+          <div class="track-name">${show.name}</div>
+          <div class="track-artist">${show.publisher ?? ''}</div>
+        </div>
+        <ha-icon class="track-play" icon="mdi:play-circle"></ha-icon>
+      </button>
+    `;
+  }
+
+  // --- Render: Calendar -------------------------------------------------
+
+  _renderCalendar() {
+    return html`
+      <div class="page page-calendar">
+        ${this._pageHeader('Calendar')}
+        ${this._calendarLoading && !this._calendarDays ? html`<div class="search-status">Loading…</div>` : html``}
+        ${this._calendarDays && this._calendarDays.length === 0
+          ? html`<div class="search-status">Nothing in the next 7 days</div>`
+          : html``}
+        ${(this._calendarDays ?? []).map(
+          (day) => html`
+            <h2 class="section-title">${this._dayLabel(day.date)}</h2>
+            <section class="calendar-day">
+              ${day.events.map(
+                (ev) => html`
+                  <div class="calendar-event ${ev.source}">
+                    <div class="calendar-event-time">${this._timeLabel(ev.start)}</div>
+                    <div class="calendar-event-title">
+                      ${ev.source === 'work' ? 'Busy' : ev.summary || '(No title)'}
+                    </div>
+                    ${ev.source === 'work' ? html`<div class="calendar-event-badge">Work</div>` : html``}
+                  </div>
+                `
+              )}
+            </section>
+          `
+        )}
+      </div>
+    `;
+  }
+
+  _dayLabel(dateStr) {
+    const date = new Date(`${dateStr}T00:00:00`);
+    const today = new Date(this._now.getFullYear(), this._now.getMonth(), this._now.getDate());
+    const diffDays = Math.round((date - today) / 86_400_000);
+    if (diffDays === 0) return 'Today';
+    if (diffDays === 1) return 'Tomorrow';
+    return date.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+  }
+
+  _timeLabel(iso) {
+    return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   }
 
   // --- Shared page header (small brand + title) ------------------------
@@ -1715,21 +1953,24 @@ class PremiumHomeCard extends LitElement {
     }
     .mode-row {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       margin-top: 20px;
     }
     .mode-btn {
-      flex: 1;
+      flex: 1 1 calc(33.333% - 6px);
+      min-width: 72px;
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
-      padding: 12px 0;
+      padding: 10px 4px;
       border-radius: 14px;
       background: var(--surface-elevated);
       color: var(--text-secondary);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
+      text-align: center;
     }
     .mode-btn ha-icon {
       --mdc-icon-size: 16px;
@@ -2320,6 +2561,28 @@ class PremiumHomeCard extends LitElement {
       margin-top: 16px;
     }
 
+    .segment-row {
+      display: flex;
+      gap: 6px;
+      background: var(--surface-elevated);
+      border-radius: 14px;
+      padding: 4px;
+      margin-top: 18px;
+    }
+    .segment-btn {
+      flex: 1;
+      padding: 10px 0;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+    .segment-btn.active {
+      background: var(--surface);
+      color: var(--text-primary);
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+    }
+
     .search-bar {
       display: flex;
       align-items: center;
@@ -2414,6 +2677,49 @@ class PremiumHomeCard extends LitElement {
     .track-play {
       --mdc-icon-size: 28px;
       color: var(--heating);
+      flex-shrink: 0;
+    }
+
+    /* ---------- Calendar ---------- */
+    .calendar-day {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .calendar-event {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 14px;
+      padding: 12px 14px;
+    }
+    .calendar-event-time {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      width: 64px;
+      flex-shrink: 0;
+    }
+    .calendar-event-title {
+      flex: 1;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .calendar-event.work .calendar-event-title {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    .calendar-event-badge {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--cooling);
+      background: color-mix(in srgb, var(--cooling) 14%, var(--surface-elevated));
+      padding: 4px 8px;
+      border-radius: 999px;
       flex-shrink: 0;
     }
   `;
