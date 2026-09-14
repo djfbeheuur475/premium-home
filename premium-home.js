@@ -139,6 +139,10 @@ class PremiumHomeCard extends LitElement {
     _searchQuery: { state: true },
     _searchResults: { state: true },
     _searching: { state: true },
+    _searchError: { state: true },
+    _topTracks: { state: true },
+    _recentTracks: { state: true },
+    _suggestionsLoading: { state: true },
   };
 
   constructor() {
@@ -158,6 +162,10 @@ class PremiumHomeCard extends LitElement {
     this._searchQuery = '';
     this._searchResults = null;
     this._searching = false;
+    this._searchError = null;
+    this._topTracks = null;
+    this._recentTracks = null;
+    this._suggestionsLoading = false;
   }
 
   // --- HA card contract -------------------------------------------------
@@ -273,6 +281,7 @@ class PremiumHomeCard extends LitElement {
     if (!query || !this._hass) return;
     this._searching = true;
     this._searchResults = null;
+    this._searchError = null;
     try {
       const resp = await this._hass.connection.sendMessagePromise({
         type: 'call_service',
@@ -283,10 +292,50 @@ class PremiumHomeCard extends LitElement {
       });
       this._searchResults = resp?.response?.result?.items ?? [];
     } catch (err) {
+      // Surfaced visibly rather than just console.warn — a silently
+      // swallowed error here looks identical to "no results", which is
+      // exactly the confusing "doesn't work" state this replaces.
       console.warn('premium-home: track search failed', err);
+      this._searchError = err?.message ?? String(err);
       this._searchResults = [];
     }
     this._searching = false;
+  }
+
+  async _fetchSuggestions() {
+    if (!this._hass || this._suggestionsLoading) return;
+    this._suggestionsLoading = true;
+    try {
+      const topResp = await this._hass.connection.sendMessagePromise({
+        type: 'call_service',
+        domain: 'spotifyplus',
+        service: 'get_users_top_tracks',
+        service_data: { entity_id: SPOTIFY_ENTITY, limit: 6, time_range: 'short_term' },
+        return_response: true,
+      });
+      this._topTracks = topResp?.response?.result?.items ?? [];
+    } catch (err) {
+      console.warn('premium-home: top tracks fetch failed', err);
+      this._topTracks = [];
+    }
+    try {
+      const recentResp = await this._hass.connection.sendMessagePromise({
+        type: 'call_service',
+        domain: 'spotifyplus',
+        service: 'get_player_recent_tracks',
+        service_data: { entity_id: SPOTIFY_ENTITY, limit: 6 },
+        return_response: true,
+      });
+      // Recently-played items wrap the track under `.track`, unlike
+      // search/top-tracks which are flat track objects — unwrap here so
+      // the rest of the UI can treat every list the same way.
+      const items = recentResp?.response?.result?.items ?? [];
+      this._recentTracks = items.map((i) => i.track).filter(Boolean);
+    } catch (err) {
+      console.warn('premium-home: recent tracks fetch failed', err);
+      this._recentTracks = [];
+    }
+    this._suggestionsLoading = false;
   }
 
   _playTrack(uri) {
@@ -341,8 +390,9 @@ class PremiumHomeCard extends LitElement {
     if (page === 'humidity') {
       HUMIDITY_SENSORS.forEach((s) => this._fetchHistory(s.id));
     }
-    if (page === 'music' && this._spotifyDevices === null) {
-      this._fetchSpotifyDevices();
+    if (page === 'music') {
+      if (this._spotifyDevices === null) this._fetchSpotifyDevices();
+      if (this._topTracks === null) this._fetchSuggestions();
     }
   }
 
@@ -840,9 +890,12 @@ class PremiumHomeCard extends LitElement {
           : html``}
 
         <div class="search-bar">
-          <ha-icon icon="mdi:magnify"></ha-icon>
+          <button class="search-icon-btn" @click=${() => this._searchTracks()}>
+            <ha-icon icon="mdi:magnify"></ha-icon>
+          </button>
           <input
-            type="text"
+            type="search"
+            enterkeyhint="search"
             placeholder="Search for a song"
             .value=${this._searchQuery}
             @input=${(e) => {
@@ -855,19 +908,46 @@ class PremiumHomeCard extends LitElement {
         </div>
 
         ${this._searching ? html`<div class="search-status">Searching…</div>` : html``}
-        ${this._searchResults && this._searchResults.length === 0 && !this._searching
+        ${this._searchError
+          ? html`<div class="search-status error">Search failed: ${this._searchError}</div>`
+          : html``}
+        ${this._searchResults && this._searchResults.length === 0 && !this._searching && !this._searchError
           ? html`<div class="search-status">No results</div>`
           : html``}
 
-        <section class="track-list">
-          ${(this._searchResults ?? []).map((track) => this._renderTrackRow(track))}
-        </section>
+        ${this._searchResults
+          ? html`
+              <section class="track-list">
+                ${this._searchResults.map((track) => this._renderTrackRow(track))}
+              </section>
+            `
+          : html`
+              ${this._recentTracks && this._recentTracks.length
+                ? html`
+                    <h2 class="section-title">Recently played</h2>
+                    <section class="track-list">
+                      ${this._recentTracks.map((track) => this._renderTrackRow(track))}
+                    </section>
+                  `
+                : html``}
+              ${this._topTracks && this._topTracks.length
+                ? html`
+                    <h2 class="section-title">Your top tracks</h2>
+                    <section class="track-list">
+                      ${this._topTracks.map((track) => this._renderTrackRow(track))}
+                    </section>
+                  `
+                : html``}
+              ${this._suggestionsLoading && !this._topTracks && !this._recentTracks
+                ? html`<div class="search-status">Loading suggestions…</div>`
+                : html``}
+            `}
       </div>
     `;
   }
 
   _renderTrackRow(track) {
-    const art = track.album?.images?.slice(-1)?.[0]?.url;
+    const art = track.image_url ?? track.album?.images?.slice(-1)?.[0]?.url;
     const artists = (track.artists ?? []).map((a) => a.name).join(', ');
     return html`
       <button class="track-row" @click=${() => this._playTrack(track.uri)} ?disabled=${!this._selectedDeviceId}>
@@ -908,12 +988,6 @@ class PremiumHomeCard extends LitElement {
       color: var(--text-primary);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       border-radius: 24px;
-      overflow: hidden;
-      /* Layered fallback: browsers without dvh support keep the vh value;
-         browsers that support dvh use it instead (accounts for mobile
-         browser chrome so the shell doesn't overshoot the real viewport). */
-      height: 100vh;
-      height: 100dvh;
       min-height: 640px;
     }
 
@@ -939,17 +1013,21 @@ class PremiumHomeCard extends LitElement {
     }
 
     .shell {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
       min-height: 640px;
       position: relative;
     }
 
+    /* No forced height and no internal overflow-y here on purpose — the
+       previous version tried to own exactly 100dvh and scroll internally,
+       which meant guessing how much vertical space HA's own chrome (app
+       bar, safe areas) actually leaves, and got it wrong: this card ended
+       up shorter than the true visible area, so the "fixed" footer sat at
+       the bottom of an internal box that wasn't the real screen. Letting
+       the shell size to its natural content and the outer HA page do the
+       scrolling — same as any normal Lovelace card — means the sticky nav
+       below tracks whatever actually scrolls, without needing to know
+       HA's exact chrome height at all. */
     .content {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
       padding: calc(20px + env(safe-area-inset-top)) 20px 24px 20px;
     }
 
@@ -1001,13 +1079,15 @@ class PremiumHomeCard extends LitElement {
     }
 
     /* ---------- Bottom nav ---------- */
-    /* A real flex child pinned to the bottom of the app shell, not
-       position: fixed — HA's view container likely applies its own CSS
-       transform for page transitions, which silently turns "fixed" into
-       "fixed relative to that container" instead of the viewport. A
-       flexbox footer has no such dependency on the embedding context. */
+    /* position: sticky, not fixed. Sticky tracks whichever ancestor
+       actually scrolls — the outer HA page in this case — without me
+       needing to know or guess its exact height, which is exactly the
+       thing that made both earlier attempts (fixed positioning, then a
+       forced 100dvh shell) wrong in slightly different ways. */
     .bottom-nav {
-      flex-shrink: 0;
+      position: sticky;
+      bottom: 0;
+      z-index: 10;
       display: flex;
       justify-content: space-around;
       align-items: center;
@@ -1522,6 +1602,10 @@ class PremiumHomeCard extends LitElement {
       padding: 12px 16px;
       margin-top: 18px;
     }
+    .search-icon-btn {
+      display: flex;
+      flex-shrink: 0;
+    }
     .search-bar ha-icon {
       --mdc-icon-size: 18px;
       color: var(--text-muted);
@@ -1534,14 +1618,21 @@ class PremiumHomeCard extends LitElement {
       font-size: 15px;
       font-family: inherit;
       color: var(--text-primary);
+      -webkit-appearance: none;
     }
     .search-bar input::placeholder {
       color: var(--text-muted);
+    }
+    .search-bar input::-webkit-search-cancel-button {
+      -webkit-appearance: none;
     }
     .search-status {
       font-size: 13px;
       color: var(--text-muted);
       margin-top: 14px;
+    }
+    .search-status.error {
+      color: #d64545;
     }
 
     .track-list {
