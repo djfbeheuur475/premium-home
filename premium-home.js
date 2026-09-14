@@ -357,7 +357,6 @@ class PremiumHomeCard extends LitElement {
   _renderHome() {
     const weather = this._hass.states[WEATHER_ENTITY];
     const houseState = this._hass.states[WHOLE_HOUSE];
-    const userName = this._hass.user?.name;
 
     const roomsOn = ROOM_LIGHTS.filter(
       (l) => this._hass.states[l.id]?.state === 'on'
@@ -369,27 +368,28 @@ class PremiumHomeCard extends LitElement {
     return html`
       <div class="page page-home">
         <section class="hero">
-          <div class="hero-text">
-            <div class="hero-greeting">
-              ${greeting(this._now)}${userName ? html`, ${userName}` : ''}
+          <div class="hero-top">
+            <div class="hero-text">
+              <div class="hero-brand">HARPER HOUSE</div>
+              <div class="hero-greeting">${greeting(this._now)}</div>
+              <div class="hero-date">
+                ${this._now.toLocaleDateString(undefined, {
+                  weekday: 'long',
+                  month: 'long',
+                  day: 'numeric',
+                })}
+              </div>
             </div>
-            <div class="hero-date">
-              ${this._now.toLocaleDateString(undefined, {
-                weekday: 'long',
-                month: 'long',
-                day: 'numeric',
-              })}
-            </div>
+            ${weather
+              ? html`
+                  <div class="hero-weather">
+                    <div class="hero-temp">${Math.round(weather.attributes.temperature)}°</div>
+                    <div class="hero-condition">${stateLabel(weather.state.replace('-', ' '))}</div>
+                  </div>
+                `
+              : html`<div class="hero-weather muted">Weather unavailable</div>`}
           </div>
-          ${weather
-            ? html`
-                <div class="hero-weather">
-                  <div class="hero-temp">${Math.round(weather.attributes.temperature)}°</div>
-                  <div class="hero-condition">${stateLabel(weather.state.replace('-', ' '))}</div>
-                </div>
-                ${this._renderForecastStrip()}
-              `
-            : html`<div class="hero-weather muted">Weather unavailable</div>`}
+          ${weather ? this._renderForecastStrip() : html``}
         </section>
 
         <section class="quick-actions">
@@ -434,6 +434,15 @@ class PremiumHomeCard extends LitElement {
             <ha-icon class="chevron" icon="mdi:chevron-right"></ha-icon>
           </button>
         </section>
+      </div>
+    `;
+  }
+
+  _pageHeader(title) {
+    return html`
+      <div class="page-header">
+        <div class="page-brand">HARPER HOUSE</div>
+        <h1 class="page-title">${title}</h1>
       </div>
     `;
   }
@@ -486,7 +495,7 @@ class PremiumHomeCard extends LitElement {
 
     return html`
       <div class="page page-climate">
-        <h1 class="page-title">Climate</h1>
+        ${this._pageHeader('Climate')}
 
         <section class="hero-climate" style="--state-color:${climateColorVar(house?.state)}">
           <div class="hero-climate-top">
@@ -597,7 +606,7 @@ class PremiumHomeCard extends LitElement {
   _renderLights() {
     return html`
       <div class="page page-lights">
-        <h1 class="page-title">Lights</h1>
+        ${this._pageHeader('Lights')}
         <section class="light-grid">
           ${ROOM_LIGHTS.map((room) => this._renderLightCard(room))}
         </section>
@@ -645,7 +654,7 @@ class PremiumHomeCard extends LitElement {
   _renderHumidity() {
     return html`
       <div class="page page-humidity">
-        <h1 class="page-title">Humidity</h1>
+        ${this._pageHeader('Humidity')}
         <section class="humidity-list">
           ${HUMIDITY_SENSORS.map((sensor) => this._renderHumidityCard(sensor))}
         </section>
@@ -698,19 +707,20 @@ class PremiumHomeCard extends LitElement {
 
   static styles = css`
     :host {
-      --background: #0b0e14;
-      --surface: #151a24;
-      --surface-elevated: #1c2230;
-      --text-primary: #f5f6f8;
-      --text-secondary: #9aa3b2;
-      --text-muted: #5c6472;
-      --accent: #5ac8fa;
-      --heating: #ff9f45;
-      --cooling: #4a90e2;
-      --fan: #2dd4bf;
-      --humidity: #4a90e2;
-      --success: #34d399;
-      --unavailable: #5c6472;
+      --background: #f3f4f7;
+      --surface: #ffffff;
+      --surface-elevated: #eef0f4;
+      --text-primary: #1b1e24;
+      --text-secondary: #6b7280;
+      --text-muted: #9aa1ac;
+      --accent: #2f6fed;
+      --heating: #f2994a;
+      --cooling: #2f80ed;
+      --fan: #14a394;
+      --humidity: #2f80ed;
+      --success: #1db876;
+      --unavailable: #b4b8c0;
+      --hairline: rgba(15, 23, 42, 0.08);
       --nav-height: 64px;
 
       display: block;
@@ -782,10 +792,19 @@ class PremiumHomeCard extends LitElement {
       }
     }
 
+    .page-header {
+      margin: 4px 0 28px 0;
+    }
+    .page-brand {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      color: var(--accent);
+      margin-bottom: 6px;
+    }
     .page-title {
       font-size: 22px;
       font-weight: 600;
-      margin: 4px 0 28px 0;
       letter-spacing: -0.01em;
     }
     .section-title {
@@ -808,9 +827,9 @@ class PremiumHomeCard extends LitElement {
       align-items: center;
       height: calc(var(--nav-height) + env(safe-area-inset-bottom));
       padding-bottom: env(safe-area-inset-bottom);
-      background: rgba(21, 26, 36, 0.92);
+      background: rgba(255, 255, 255, 0.85);
       backdrop-filter: blur(16px);
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      border-top: 1px solid var(--hairline);
     }
     /* Fallback: if an ancestor breaks fixed positioning, this rule keeps
        the nav pinned to the bottom of the flex shell instead of floating
@@ -838,11 +857,24 @@ class PremiumHomeCard extends LitElement {
 
     /* ---------- Home ---------- */
     .hero {
-      background: linear-gradient(160deg, #1b2340 0%, #202a4d 60%, #16203d 100%);
+      background: linear-gradient(160deg, #eaf1ff 0%, #f3f7ff 55%, #ffffff 100%);
       border-radius: 24px;
       padding: 24px;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      border: 1px solid var(--hairline);
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }
+    .hero-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .hero-brand {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      color: var(--accent);
+      margin-bottom: 10px;
     }
     .hero-greeting {
       font-size: 24px;
@@ -855,27 +887,27 @@ class PremiumHomeCard extends LitElement {
       margin-top: 4px;
     }
     .hero-weather {
-      display: flex;
-      align-items: baseline;
-      gap: 12px;
-      margin-top: 22px;
+      text-align: right;
+      flex-shrink: 0;
     }
     .hero-temp {
-      font-size: 44px;
+      font-size: 40px;
       font-weight: 300;
       letter-spacing: -0.02em;
+      line-height: 1;
     }
     .hero-condition {
-      font-size: 15px;
+      font-size: 13px;
       color: var(--text-secondary);
       text-transform: capitalize;
+      margin-top: 4px;
     }
     .forecast-strip {
       display: flex;
       justify-content: space-between;
       margin-top: 20px;
       padding-top: 18px;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      border-top: 1px solid var(--hairline);
     }
     .forecast-day {
       display: flex;
@@ -910,7 +942,7 @@ class PremiumHomeCard extends LitElement {
       gap: 8px;
       padding: 14px;
       background: var(--surface);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--hairline);
       border-radius: 18px;
       font-size: 14px;
       font-weight: 500;
@@ -931,11 +963,11 @@ class PremiumHomeCard extends LitElement {
       align-items: center;
       gap: 16px;
       background: var(--surface);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--hairline);
       border-radius: 20px;
       padding: 18px 20px;
       text-align: left;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
     }
     .summary-card ha-icon:first-child {
       --mdc-icon-size: 24px;
@@ -961,10 +993,10 @@ class PremiumHomeCard extends LitElement {
     /* ---------- Climate ---------- */
     .hero-climate {
       background: var(--surface);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--hairline);
       border-radius: 24px;
       padding: 24px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
     }
     .hero-climate-top {
       display: flex;
@@ -1043,10 +1075,10 @@ class PremiumHomeCard extends LitElement {
     }
     .zone-card {
       background: var(--surface);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--hairline);
       border-radius: 20px;
       padding: 18px;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
     }
     .zone-card.unavailable {
       opacity: 0.55;
@@ -1103,10 +1135,10 @@ class PremiumHomeCard extends LitElement {
     }
     .light-card {
       background: var(--surface);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--hairline);
       border-radius: 20px;
       padding: 20px;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
       transition: box-shadow 200ms ease;
     }
     .light-card.on {
@@ -1175,10 +1207,10 @@ class PremiumHomeCard extends LitElement {
     }
     .humidity-card {
       background: var(--surface);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--hairline);
       border-radius: 20px;
       padding: 20px;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
     }
     .humidity-card.unavailable {
       opacity: 0.5;
@@ -1228,6 +1260,6 @@ customElements.define('premium-home', PremiumHomeCard);
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'premium-home',
-  name: 'Premium Home',
+  name: 'Harper House',
   description: 'Custom smart-home dashboard — Home / Climate / Lights / Humidity.',
 });
