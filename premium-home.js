@@ -333,7 +333,8 @@ class PremiumHomeCard extends LitElement {
       const items = resp?.response?.result?.Items ?? [];
       this._spotifyDevices = items.filter((d) => d.Name !== 'Home Assistant');
       if (!this._selectedDeviceId && this._spotifyDevices.length) {
-        this._selectedDeviceId = this._spotifyDevices[0].Id;
+        const kitchen = this._spotifyDevices.find((d) => d.Name === 'Kitchen');
+        this._selectedDeviceId = (kitchen ?? this._spotifyDevices[0]).Id;
       }
     } catch (err) {
       console.warn('premium-home: spotify device list failed', err);
@@ -539,9 +540,12 @@ class PremiumHomeCard extends LitElement {
 
   _playTrack(uri) {
     if (!this._selectedDeviceId) return;
+    // The service's `uris` field takes a single string, not an array —
+    // confirmed by the actual "value should be a string at 'uris'" error
+    // the first version threw on every tap.
     this._hass.callService('spotifyplus', 'player_media_play_tracks', {
       entity_id: SPOTIFY_ENTITY,
-      uris: [uri],
+      uris: uri,
       device_id: this._selectedDeviceId,
     });
   }
