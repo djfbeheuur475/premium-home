@@ -149,6 +149,16 @@ class PremiumHomeCard extends LitElement {
 
   // --- HA card contract -------------------------------------------------
 
+  // Required by every Lovelace card, custom or built-in — HA's card
+  // creation helper checks for this method before it will even try to
+  // mount the element, and silently substitutes its own "Configuration
+  // error" card instead if it's missing. This card takes no YAML config
+  // of its own (all data comes from hass), so there's nothing to do with
+  // it beyond storing it.
+  setConfig(config) {
+    this._config = config ?? {};
+  }
+
   set hass(hass) {
     const first = this._hass === null;
     this._hass = hass;
