@@ -802,8 +802,9 @@ class PremiumHomeCard extends LitElement {
       backdrop-filter: blur(16px);
       border-top: 1px solid rgba(255, 255, 255, 0.06);
     }
-    /* Fallback: if an ancestor breaks `fixed`, this rule keeps the nav
-       pinned to the bottom of the flex shell instead of floating away. */
+    /* Fallback: if an ancestor breaks fixed positioning, this rule keeps
+       the nav pinned to the bottom of the flex shell instead of floating
+       away. */
     :host(:not(.js-fixed-ok)) .bottom-nav {
       position: sticky;
     }
