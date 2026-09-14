@@ -51,6 +51,7 @@ const HUMIDITY_SENSORS = [
 ];
 
 const WEATHER_ENTITY = 'weather.forecast_home';
+const SPOTIFY_ENTITY = 'media_player.spotifyplus_aidan_harper';
 
 const ALL_LIGHT_IDS = ROOM_LIGHTS.map((l) => l.id);
 
@@ -132,6 +133,12 @@ class PremiumHomeCard extends LitElement {
     _history: { state: true },
     _now: { state: true },
     _dragBrightness: { state: true },
+    _spotifyDevices: { state: true },
+    _spotifyDevicesLoading: { state: true },
+    _selectedDeviceId: { state: true },
+    _searchQuery: { state: true },
+    _searchResults: { state: true },
+    _searching: { state: true },
   };
 
   constructor() {
@@ -145,6 +152,12 @@ class PremiumHomeCard extends LitElement {
     this._hass = null;
     this._forecastInterval = null;
     this._clockInterval = null;
+    this._spotifyDevices = null;
+    this._spotifyDevicesLoading = false;
+    this._selectedDeviceId = null;
+    this._searchQuery = '';
+    this._searchResults = null;
+    this._searching = false;
   }
 
   // --- HA card contract -------------------------------------------------
@@ -231,6 +244,64 @@ class PremiumHomeCard extends LitElement {
     }
   }
 
+  async _fetchSpotifyDevices() {
+    if (!this._hass || this._spotifyDevicesLoading) return;
+    this._spotifyDevicesLoading = true;
+    try {
+      const resp = await this._hass.connection.sendMessagePromise({
+        type: 'call_service',
+        domain: 'spotifyplus',
+        service: 'get_spotify_connect_devices',
+        service_data: { entity_id: SPOTIFY_ENTITY, refresh: false },
+        return_response: true,
+      });
+      const items = resp?.response?.result?.Items ?? [];
+      // "Home Assistant" is SpotifyPlus's own virtual device, not a room speaker.
+      this._spotifyDevices = items.filter((d) => d.Name !== 'Home Assistant');
+      if (!this._selectedDeviceId && this._spotifyDevices.length) {
+        this._selectedDeviceId = this._spotifyDevices[0].Id;
+      }
+    } catch (err) {
+      console.warn('premium-home: spotify device list failed', err);
+      this._spotifyDevices = [];
+    }
+    this._spotifyDevicesLoading = false;
+  }
+
+  async _searchTracks() {
+    const query = this._searchQuery.trim();
+    if (!query || !this._hass) return;
+    this._searching = true;
+    this._searchResults = null;
+    try {
+      const resp = await this._hass.connection.sendMessagePromise({
+        type: 'call_service',
+        domain: 'spotifyplus',
+        service: 'search_tracks',
+        service_data: { entity_id: SPOTIFY_ENTITY, criteria: query, limit: 12 },
+        return_response: true,
+      });
+      this._searchResults = resp?.response?.result?.items ?? [];
+    } catch (err) {
+      console.warn('premium-home: track search failed', err);
+      this._searchResults = [];
+    }
+    this._searching = false;
+  }
+
+  _playTrack(uri) {
+    if (!this._selectedDeviceId) return;
+    this._hass.callService('spotifyplus', 'player_media_play_tracks', {
+      entity_id: SPOTIFY_ENTITY,
+      uris: [uri],
+      device_id: this._selectedDeviceId,
+    });
+  }
+
+  _transport(action) {
+    this._hass.callService('media_player', action, { entity_id: SPOTIFY_ENTITY });
+  }
+
   // --- Services -------------------------------------------------------
 
   _toggleLight(entityId) {
@@ -269,6 +340,9 @@ class PremiumHomeCard extends LitElement {
     this._page = page;
     if (page === 'humidity') {
       HUMIDITY_SENSORS.forEach((s) => this._fetchHistory(s.id));
+    }
+    if (page === 'music' && this._spotifyDevices === null) {
+      this._fetchSpotifyDevices();
     }
   }
 
@@ -323,6 +397,8 @@ class PremiumHomeCard extends LitElement {
         return this._renderLights();
       case 'humidity':
         return this._renderHumidity();
+      case 'music':
+        return this._renderMusic();
       default:
         return this._renderHome();
     }
@@ -334,6 +410,7 @@ class PremiumHomeCard extends LitElement {
       { id: 'climate', icon: 'mdi:thermostat', label: 'Climate' },
       { id: 'lights', icon: 'mdi:lightbulb-group-outline', label: 'Lights' },
       { id: 'humidity', icon: 'mdi:water-percent', label: 'Humidity' },
+      { id: 'music', icon: 'mdi:spotify', label: 'Music' },
     ];
     return html`
       <nav class="bottom-nav">
@@ -703,6 +780,109 @@ class PremiumHomeCard extends LitElement {
     `;
   }
 
+  // --- Render: Music -------------------------------------------------
+
+  _renderMusic() {
+    const player = this._hass.states[SPOTIFY_ENTITY];
+    const nowPlaying = player?.attributes?.media_title
+      ? {
+          title: player.attributes.media_title,
+          artist: player.attributes.media_artist,
+          image: player.attributes.entity_picture,
+          playing: player.state === 'playing',
+        }
+      : null;
+
+    return html`
+      <div class="page page-music">
+        ${this._pageHeader('Music')}
+
+        <div class="device-row">
+          ${this._spotifyDevicesLoading && !this._spotifyDevices
+            ? html`<div class="device-loading">Finding speakers…</div>`
+            : (this._spotifyDevices ?? []).map(
+                (d) => html`
+                  <button
+                    class="device-chip ${this._selectedDeviceId === d.Id ? 'active' : ''}"
+                    @click=${() => {
+                      this._selectedDeviceId = d.Id;
+                    }}
+                  >
+                    ${d.Name}
+                  </button>
+                `
+              )}
+        </div>
+
+        ${nowPlaying
+          ? html`
+              <section class="now-playing">
+                ${nowPlaying.image
+                  ? html`<img class="now-playing-art" src=${nowPlaying.image} alt="" />`
+                  : html`<div class="now-playing-art placeholder"><ha-icon icon="mdi:music-note"></ha-icon></div>`}
+                <div class="now-playing-text">
+                  <div class="now-playing-title">${nowPlaying.title}</div>
+                  <div class="now-playing-artist">${nowPlaying.artist ?? ''}</div>
+                </div>
+                <div class="now-playing-controls">
+                  <button class="round-btn small" @click=${() => this._transport('media_previous_track')}>
+                    <ha-icon icon="mdi:skip-previous"></ha-icon>
+                  </button>
+                  <button class="round-btn" @click=${() => this._transport('media_play_pause')}>
+                    <ha-icon icon=${nowPlaying.playing ? 'mdi:pause' : 'mdi:play'}></ha-icon>
+                  </button>
+                  <button class="round-btn small" @click=${() => this._transport('media_next_track')}>
+                    <ha-icon icon="mdi:skip-next"></ha-icon>
+                  </button>
+                </div>
+              </section>
+            `
+          : html``}
+
+        <div class="search-bar">
+          <ha-icon icon="mdi:magnify"></ha-icon>
+          <input
+            type="text"
+            placeholder="Search for a song"
+            .value=${this._searchQuery}
+            @input=${(e) => {
+              this._searchQuery = e.target.value;
+            }}
+            @keydown=${(e) => {
+              if (e.key === 'Enter') this._searchTracks();
+            }}
+          />
+        </div>
+
+        ${this._searching ? html`<div class="search-status">Searching…</div>` : html``}
+        ${this._searchResults && this._searchResults.length === 0 && !this._searching
+          ? html`<div class="search-status">No results</div>`
+          : html``}
+
+        <section class="track-list">
+          ${(this._searchResults ?? []).map((track) => this._renderTrackRow(track))}
+        </section>
+      </div>
+    `;
+  }
+
+  _renderTrackRow(track) {
+    const art = track.album?.images?.slice(-1)?.[0]?.url;
+    const artists = (track.artists ?? []).map((a) => a.name).join(', ');
+    return html`
+      <button class="track-row" @click=${() => this._playTrack(track.uri)} ?disabled=${!this._selectedDeviceId}>
+        ${art
+          ? html`<img class="track-art" src=${art} alt="" />`
+          : html`<div class="track-art placeholder"><ha-icon icon="mdi:music-note"></ha-icon></div>`}
+        <div class="track-text">
+          <div class="track-name">${track.name}</div>
+          <div class="track-artist">${artists}</div>
+        </div>
+        <ha-icon class="track-play" icon="mdi:play-circle"></ha-icon>
+      </button>
+    `;
+  }
+
   // --- Styles ---------------------------------------------------------
 
   static styles = css`
@@ -724,12 +904,16 @@ class PremiumHomeCard extends LitElement {
       --nav-height: 64px;
 
       display: block;
-      background: var(--background);
+      background: linear-gradient(165deg, #eef1fb 0%, #f8f5f1 55%, #fdf6f0 100%);
       color: var(--text-primary);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       border-radius: 24px;
       overflow: hidden;
-      height: 100%;
+      /* Layered fallback: browsers without dvh support keep the vh value;
+         browsers that support dvh use it instead (accounts for mobile
+         browser chrome so the shell doesn't overshoot the real viewport). */
+      height: 100vh;
+      height: 100dvh;
       min-height: 640px;
     }
 
@@ -764,9 +948,9 @@ class PremiumHomeCard extends LitElement {
 
     .content {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
-      padding: calc(20px + env(safe-area-inset-top)) 20px
-        calc(var(--nav-height) + env(safe-area-inset-bottom) + 24px) 20px;
+      padding: calc(20px + env(safe-area-inset-top)) 20px 24px 20px;
     }
 
     @media (min-width: 900px) {
@@ -817,11 +1001,13 @@ class PremiumHomeCard extends LitElement {
     }
 
     /* ---------- Bottom nav ---------- */
+    /* A real flex child pinned to the bottom of the app shell, not
+       position: fixed — HA's view container likely applies its own CSS
+       transform for page transitions, which silently turns "fixed" into
+       "fixed relative to that container" instead of the viewport. A
+       flexbox footer has no such dependency on the embedding context. */
     .bottom-nav {
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 0;
+      flex-shrink: 0;
       display: flex;
       justify-content: space-around;
       align-items: center;
@@ -830,12 +1016,6 @@ class PremiumHomeCard extends LitElement {
       background: rgba(255, 255, 255, 0.85);
       backdrop-filter: blur(16px);
       border-top: 1px solid var(--hairline);
-    }
-    /* Fallback: if an ancestor breaks fixed positioning, this rule keeps
-       the nav pinned to the bottom of the flex shell instead of floating
-       away. */
-    :host(:not(.js-fixed-ok)) .bottom-nav {
-      position: sticky;
     }
     .nav-btn {
       display: flex;
@@ -1251,6 +1431,171 @@ class PremiumHomeCard extends LitElement {
     .sparkline-placeholder {
       height: 24px;
       margin-top: 12px;
+    }
+
+    /* ---------- Music ---------- */
+    .device-row {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+    .device-chip {
+      flex-shrink: 0;
+      padding: 9px 16px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+    .device-chip.active {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+    .device-loading {
+      font-size: 13px;
+      color: var(--text-muted);
+      padding: 9px 0;
+    }
+
+    .now-playing {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 20px;
+      padding: 14px;
+      margin-top: 18px;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+    }
+    .now-playing-art {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+    .now-playing-art.placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface-elevated);
+      color: var(--text-muted);
+    }
+    .now-playing-text {
+      flex: 1;
+      min-width: 0;
+    }
+    .now-playing-title {
+      font-size: 14px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .now-playing-artist {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .now-playing-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .search-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 16px;
+      padding: 12px 16px;
+      margin-top: 18px;
+    }
+    .search-bar ha-icon {
+      --mdc-icon-size: 18px;
+      color: var(--text-muted);
+    }
+    .search-bar input {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: none;
+      font-size: 15px;
+      font-family: inherit;
+      color: var(--text-primary);
+    }
+    .search-bar input::placeholder {
+      color: var(--text-muted);
+    }
+    .search-status {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 14px;
+    }
+
+    .track-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 8px;
+    }
+    .track-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 8px;
+      border-radius: 14px;
+      text-align: left;
+      width: 100%;
+    }
+    .track-art {
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+    .track-art.placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface-elevated);
+      color: var(--text-muted);
+    }
+    .track-text {
+      flex: 1;
+      min-width: 0;
+    }
+    .track-name {
+      font-size: 14px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .track-artist {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .track-play {
+      --mdc-icon-size: 26px;
+      color: var(--accent);
+      flex-shrink: 0;
     }
   `;
 }
